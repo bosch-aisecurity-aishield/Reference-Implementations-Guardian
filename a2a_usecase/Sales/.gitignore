@@ -1,0 +1,22 @@
+# Data directories - database files and volumes
+/data/
+
+# Build artifacts
+/proxy-service/target/
+/admin-ui/node_modules/
+
+# IDE files
+.idea/
+.vscode/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+chroma_data/
+# LangGraph runtime artifacts
+.langgraph_api/*.pckl

@@ -1,0 +1,16 @@
+{
+    "$schema": "https://langgra.ph/schema.json",
+    "graphs": {
+        "FinanceAgent": "./agent.py:graph"
+    },
+    "env": "./.env",
+    "python_version": "3.12",
+    "dependencies": ["."],
+    "agent_card": {
+        "name": "FinanceAgent",
+        "description": "Auto finance specialist. Handles loan calculations and payment estimates."
+    },
+    "auth": {
+        "path": "./auth.py:auth"
+    }
+}

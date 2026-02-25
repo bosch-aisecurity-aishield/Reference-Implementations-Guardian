@@ -1,0 +1,13 @@
+langgraph
+langgraph-cli
+langgraph-api
+langchain-core
+langchain-openai
+langchain-ollama
+python-dotenv
+aiohttp
+mcp
+psycopg2-binary
+chromadb
+
+langchain-mcp-adapters

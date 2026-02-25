@@ -1,0 +1,16 @@
+{
+    "$schema": "https://langgra.ph/schema.json",
+    "graphs": {
+        "InventoryAgent": "./agent.py:graph"
+    },
+    "env": "./.env",
+    "python_version": "3.12",
+    "dependencies": ["."],
+    "agent_card": {
+        "name": "InventoryAgent",
+        "description": "Vehicle search specialist with SQL, RAG, and image capabilities."
+    },
+    "auth": {
+        "path": "./auth.py:auth"
+    }
+}

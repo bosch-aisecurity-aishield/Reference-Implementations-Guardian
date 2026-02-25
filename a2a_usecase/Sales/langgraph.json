@@ -1,0 +1,23 @@
+{
+    "$schema": "https://langgra.ph/schema.json",
+    "graphs": {
+        "SalesAgent": "./agent.py:graph"
+    },
+    "env": "./.env",
+    "http": {
+    "configurable_headers": {
+      "includes": [
+        "x-aishield-trace-id"
+      ]
+        }
+    },
+    "python_version": "3.12",
+    "dependencies": ["."],
+    "agent_card": {
+        "name": "SalesAgent",
+        "description": "Customer-facing orchestrator. Routes to Inventory and Finance specialists."
+    },
+    "auth": {
+        "path": "./auth.py:auth"
+    }
+}
