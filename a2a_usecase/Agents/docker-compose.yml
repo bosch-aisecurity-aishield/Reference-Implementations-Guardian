@@ -3,16 +3,15 @@ services:
   finance:
     build:
       context: ./Finance
-      dockerfile: Dockerfile
     container_name: finance_agent
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
       - FINANCE_MODEL=${FINANCE_MODEL}
       - API_KEY=${API_KEY}
+      - LITELLM_API_KEY=${LITELLM_API_KEY}
+      - FINANCE_MCP_SERVER_URL=${FINANCE_MCP_SERVER_URL}
     ports:
       - "2024:2024"
-    volumes:
-      - ./Finance:/app
     networks:
       - agent_network
     restart: unless-stopped
@@ -21,19 +20,16 @@ services:
   inventory:
     build:
       context: ./Inventory
-      dockerfile: Dockerfile
     container_name: inventory_agent
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
       - INVENTORY_MODEL=${INVENTORY_MODEL}
-      - POSTGRES_DSN=${POSTGRES_DSN}
       - CHROMA_PERSIST_DIR=/app/chroma_data
       - API_KEY=${API_KEY}   
+      - LITELLM_API_KEY=${LITELLM_API_KEY}
+      - INVENTORY_MCP_SERVER_URL=${INVENTORY_MCP_SERVER_URL}
     ports:
       - "2025:2025"
-    volumes:
-      - ./Inventory:/app
-      - inventory_chroma:/app/chroma_data
     networks:
       - agent_network
     restart: unless-stopped
@@ -42,7 +38,6 @@ services:
   sales:
     build:
       context: ./Sales
-      dockerfile: Dockerfile
     container_name: sales_agent
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
@@ -55,8 +50,17 @@ services:
       - LITELLM_API_KEY=${LITELLM_API_KEY}
     ports:
       - "2026:2026"
-    volumes:
-      - ./Sales:/app
+    networks:
+      - agent_network
+    restart: unless-stopped
+
+ # Ollama Server
+  ollama:
+    build:
+      context: ./Ollama
+    container_name: ollama
+    ports:
+      - "11434:11434"
     networks:
       - agent_network
     restart: unless-stopped
@@ -64,7 +68,3 @@ services:
 networks:
   agent_network:
     driver: bridge
-
-volumes:
-  inventory_chroma:
-    driver: local

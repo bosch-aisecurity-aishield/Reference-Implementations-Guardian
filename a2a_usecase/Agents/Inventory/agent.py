@@ -36,14 +36,15 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
+
 
 from langchain_core.messages import AIMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import RetryPolicy
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 
 # ── Logging Setup ────────────────────────────────────────────────────────────
 
@@ -57,8 +58,8 @@ logger = logging.getLogger("InventoryAgent")
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 INVENTORY_MODEL = os.getenv("INVENTORY_MODEL", "qwen2.5-coder")
-
-MCP_SERVER_PATH = str(Path(__file__).parent / "mcp_server.py")
+LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "your_litellm_api_key_here")
+INVENTORY_MCP_SERVER_URL = os.getenv("INVENTORY_MCP_SERVER_URL", "http://localhost:8000")
 
 # ── State Definition ─────────────────────────────────────────────────────────
 
@@ -172,67 +173,82 @@ Question: {query}
 Respond ONLY with JSON: {{ "message": "<your text>" }}
 """
 
+server_config = {
+    "finance": {
+        "transport": "streamable_http",
+        "url": INVENTORY_MCP_SERVER_URL,
+        "headers": {"x-litellm-api-key": f"Bearer {LITELLM_API_KEY}"}
+    }
+}
 
 # ── Core Agent Logic ─────────────────────────────────────────────────────────
-
 async def _call_mcp_sql(query: str) -> str:
-    """Execute SQL query via MCP server.
-    
+    """Execute SQL query via MCP server over streamable HTTP.
+
     Args:
         query: Complete SQL SELECT statement
-        
+
     Returns:
         JSON string with query results
     """
-    server_params = StdioServerParameters(
-        command=sys.executable,
-        args=[str(MCP_SERVER_PATH)],
-    )
+    cfg = server_config["finance"]
     print(f"Calling MCP SQL with query: {query}")
+
     try:
-        async with stdio_client(server_params) as (read, write):
+        async with streamable_http_client(
+            url=cfg["url"],
+            headers=cfg.get("headers", {})
+        ) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
+
                 res = await session.call_tool(
-                    "run_sql_query", 
+                    "run_sql_query",
                     arguments={"query": query}
                 )
                 print(f"MCP SQL response: {res}")
-                if res.content and hasattr(res.content[0], "text"):
+
+                if getattr(res, "content", None) and hasattr(res.content[0], "text"):
                     return res.content[0].text
                 return str(res)
+
     except Exception as e:
         logger.error(f"MCP SQL call failed: {e}")
-        return '{"error": "' + str(e) + '"}'
+        return json.dumps({"error": str(e)})
 
 
-async def _call_mcp_rag(query: str, max_results: int = 5) -> tuple[str, List[str]]:
-    """Execute RAG vector search via MCP server.
-    
+async def _call_mcp_rag(query: str, max_results: int = 5) -> Tuple[str, List[str]]:
+    """Execute RAG vector search via MCP server over streamable HTTP.
+
     Args:
         query: Natural language search phrase
         max_results: Maximum number of image results (1-20)
-        
+
     Returns:
         Tuple of (raw_data_json, list_of_base64_images)
     """
-    server_params = StdioServerParameters(
-        command=sys.executable,
-        args=[str(MCP_SERVER_PATH)],
-    )
+    cfg = server_config["finance"]
 
     try:
-        async with stdio_client(server_params) as (read, write):
+        async with streamable_http_client(
+            url=cfg["url"],
+            headers=cfg.get("headers", {})
+        ) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
+
                 res = await session.call_tool(
-                    "search_vehicle_images", 
+                    "search_vehicle_images",
                     arguments={"query": query, "max_results": max_results}
                 )
-                
-                raw_data = res.content[0].text if res.content and hasattr(res.content[0], "text") else str(res)
-                
-                images = []
+
+                raw_data = (
+                    res.content[0].text
+                    if getattr(res, "content", None) and hasattr(res.content[0], "text")
+                    else str(res)
+                )
+
+                images: List[str] = []
                 try:
                     data_json = json.loads(raw_data)
                     if "results" in data_json:
@@ -242,11 +258,12 @@ async def _call_mcp_rag(query: str, max_results: int = 5) -> tuple[str, List[str
                                 images.append(img_b64)
                 except json.JSONDecodeError:
                     pass
-                    
+
                 return raw_data, images
+
     except Exception as e:
         logger.error(f"MCP RAG call failed: {e}")
-        return '{"error": "' + str(e) + '"}', []
+        return json.dumps({"error": str(e)}), []
 
 async def router_node(state: State) -> Dict[str, Any]:
     """Analyze user intent and determine execution route.
