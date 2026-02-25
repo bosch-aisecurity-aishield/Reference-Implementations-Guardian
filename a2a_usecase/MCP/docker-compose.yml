@@ -1,0 +1,65 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: mcp-postgres
+    environment:
+      POSTGRES_DB: dealership
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d dealership -h localhost -p 5432"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - mcp-net
+
+  inventory-mcp:
+    build:
+      context: ./InventoryMCP
+    container_name: inventory-mcp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    # env_file:
+    #   - ./InventoryMCP/.env
+    environment:
+      POSTGRES_DSN: "dbname=dealership user=admin password=password123 host=postgres port=5432"
+      CHROMA_PERSIST_DIR: "/app/chroma_data"
+      MCP_PORT: "8081"
+    volumes:
+      - ./InventoryMCP/chroma_data:/app/chroma_data
+    restart: unless-stopped
+    networks:
+      - mcp-net
+
+  finance-mcp:
+    build:
+      context: ./FinanceMCP
+    container_name: finance-mcp
+    ports:
+      - "8081:8081"
+    # env_file:
+    #   - ./FinanceMCP/.env
+    environment:
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8081"
+    restart: unless-stopped
+    networks:
+      - mcp-net
+
+volumes:
+  postgres_data:
+
+networks:
+  mcp-net:
+    driver: bridge

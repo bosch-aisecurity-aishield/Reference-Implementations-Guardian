@@ -10,11 +10,45 @@ Usage:
     This server is launched automatically by the Finance Agent.
     Direct usage: python -m finance.mcp_server
 """
-
+import os
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("Finance Service")
 
+mcp.settings.host = os.getenv("MCP_HOST", "0.0.0.0")
+mcp.settings.port = int(os.getenv("MCP_PORT", "8000"))
+
+# -----------------------------------------------------------------------------
+# CORS / Transport security
+# -----------------------------------------------------------------------------
+# Set your public host/IP (or DNS) here. Prefer DNS if you have it.
+
+EC2_PUBLIC_HOST = os.getenv("MCP_PUBLIC_HOST", "16.58.206.13")
+PORT = mcp.settings.port
+
+# If you REALLY want to allow any origin/host (not recommended), set:
+#   MCP_ALLOW_ANY_ORIGIN=true
+allow_any = os.getenv("MCP_ALLOW_ANY_ORIGIN", "false").lower() == "true"
+allowed_hosts = [
+    f"{EC2_PUBLIC_HOST}:{PORT}",
+    "localhost:*",
+    "127.0.0.1:*",
+]
+
+allowed_origins = [
+    f"http://{EC2_PUBLIC_HOST}:{PORT}",
+    f"https://{EC2_PUBLIC_HOST}:{PORT}",
+    "http://localhost:*",
+    "http://127.0.0.1:*",
+]
+
+if allow_any:
+    # ⚠️ Dangerous on public servers
+    allowed_hosts.append("*:*")
+    allowed_origins.append("*")
+    
+mcp.settings.transport_security.allowed_hosts.extend(allowed_hosts)
+mcp.settings.transport_security.allowed_origins.extend(allowed_origins)
 
 @mcp.tool()
 def calculate_monthly_payment(price: float, rate: float, months: int) -> str:
@@ -231,4 +265,4 @@ def calculate_total_cost_comparison(
 
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport="streamable-http")

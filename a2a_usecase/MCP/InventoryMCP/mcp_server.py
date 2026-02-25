@@ -28,6 +28,43 @@ if _env_path.exists():
 
 mcp = FastMCP("Inventory Service")
 
+
+mcp.settings.host = os.getenv("MCP_HOST", "0.0.0.0")
+mcp.settings.port = int(os.getenv("MCP_PORT", "8081"))
+
+# -----------------------------------------------------------------------------
+# CORS / Transport security
+# -----------------------------------------------------------------------------
+# Set your public host/IP (or DNS) here. Prefer DNS if you have it.
+
+EC2_PUBLIC_HOST = os.getenv("MCP_PUBLIC_HOST", "16.58.206.13")
+PORT = mcp.settings.port
+
+# If you REALLY want to allow any origin/host (not recommended), set:
+#   MCP_ALLOW_ANY_ORIGIN=true
+allow_any = os.getenv("MCP_ALLOW_ANY_ORIGIN", "false").lower() == "true"
+allowed_hosts = [
+    f"{EC2_PUBLIC_HOST}:{PORT}",
+    "localhost:*",
+    "127.0.0.1:*",
+]
+
+allowed_origins = [
+    f"http://{EC2_PUBLIC_HOST}:{PORT}",
+    f"https://{EC2_PUBLIC_HOST}:{PORT}",
+    "http://localhost:*",
+    "http://127.0.0.1:*",
+]
+
+if allow_any:
+    # ⚠️ Dangerous on public servers
+    allowed_hosts.append("*:*")
+    allowed_origins.append("*")
+    
+mcp.settings.transport_security.allowed_hosts.extend(allowed_hosts)
+mcp.settings.transport_security.allowed_origins.extend(allowed_origins)
+
+
 # ── Configuration ────────────────────────────────────────────────────────────
 
 # Use environment variable (passed by Docker) or fallback to host.docker.internal for Docker environments
@@ -237,4 +274,4 @@ def get_vehicle_details_with_images(vin: str) -> str:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(transport="streamable-http")
