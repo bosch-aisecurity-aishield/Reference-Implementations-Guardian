@@ -49,6 +49,7 @@ VISION_MODEL = os.getenv("VISION_MODEL", "llama3.2-vision")
 
 LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "http://host.docker.internal:4000")
 LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "sk-1234")
+ROOT_AGENT_IDENTIFIER = os.getenv("ROOT_AGENT_IDENTIFIER", "SalesAgent-Orchestrator")
 
 SPECIALIST_AID = {
     "inventory":  os.getenv("INVENTORY_A2A_AID", "AIS:InventoryAgent"),
@@ -174,7 +175,7 @@ def compress_base64_image(base64_string: str, max_size: int = 800) -> str:
 async def _a2a_call(base_url: str, text: str, aid: str, api_key: str = None) -> Dict[str, Any]:
     """Execute A2A JSON-RPC call to a specialist agent."""
     base = base_url.rstrip("/")
-    headers = {"x-api-key": api_key, "x-caller-agent": "SalesAgent"} if api_key else {}
+    headers = {"x-api-key": api_key, "x-caller-agent": ROOT_AGENT_IDENTIFIER} if api_key else {}
     aishield_headers = _get_aishield_headers()
     if aishield_headers:
         headers["x-aishield-trace-id"] = aishield_headers

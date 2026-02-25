@@ -48,6 +48,7 @@ services:
       - API_KEY=${API_KEY}
       - LITELLM_BASE_URL=${LITELLM_BASE_URL}
       - LITELLM_API_KEY=${LITELLM_API_KEY}
+      - ROOT_AGENT_IDENTIFIER=${ROOT_AGENT_IDENTIFIER}
     ports:
       - "2026:2026"
     networks:
