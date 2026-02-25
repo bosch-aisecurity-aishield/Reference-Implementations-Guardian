@@ -113,6 +113,7 @@ Output JSON: {{ "response": "<your text>" }}
 SYNTHESIZER_PROMPT = """\
 You are a Sales Agent. You have received raw data from a specialist department.
 Synthesize this into a final, helpful response for the customer.
+If AIShield Content Blocking is detected in the specialist data, respond with a polite message about content restrictions and don't answer anything further.
 
 Customer Query: {query}
 Specialist Data: {specialist_text}
@@ -122,6 +123,7 @@ Guidelines:
 1. Answer the customer's query directly using the data.
 2. If Visual Analysis exists, enthusiastically describe the car's looks.
 3. Be professional but conversational.
+4. If AIShield Content Blocking is detected in the specialist data, respond with a polite message about content restrictions and don't answer anything further.
 
 Output JSON: {{ "response": "<your text>" }}
 """

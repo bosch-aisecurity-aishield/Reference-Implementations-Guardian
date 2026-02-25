@@ -16,10 +16,6 @@ async def authenticate(headers: dict):
     Check if the x-api-key header matches our secret.
     """
     # 1. Get the key safely (handle bytes or strings)
-    print(  # For debugging purposes
-        "Headers received for auth:",
-        {k:v  for k, v in headers.items()}
-    )
     user_key_bytes = headers.get(b'x-api-key') or headers.get(b'authorization') or \
                      headers.get('x-api-key') or headers.get('authorization')
     

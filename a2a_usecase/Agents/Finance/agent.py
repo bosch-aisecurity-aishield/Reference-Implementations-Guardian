@@ -1,92 +1,151 @@
-"""Finance Agent – ReAct-based autonomous agent with MCP tool auto-discovery.
+"""
+Finance Agent – ReAct-based autonomous agent with MCP tool integration.
 
-This agent autonomously handles loan calculations using MCP-exposed tools.
-The LLM dynamically decides which tools to call based on user queries.
-
-MCP Tools (Auto-discovered from mcp_server.py):
-    - calculate_monthly_payment: Single loan scenario calculation
-    - compare_loan_options: Multi-scenario comparison (rates × terms)
-    - calculate_affordability: Max price from monthly budget (reverse calculation)
-    - get_rate_recommendations: Credit score-based rate guidance
-    - calculate_total_cost_comparison: Full breakdown with down payment
-
-Architecture:
-    - Uses create_react_agent() for autonomous tool selection
-    - LLM sees all MCP tools and chooses appropriate ones
-    - No manual parameter extraction needed
-    - Fully autonomous decision-making
-
-Environment Variables:
-    OLLAMA_BASE_URL: Ollama server URL (default: http://localhost:11434)
-    FINANCE_MODEL: LLM model name (default: qwen2.5-coder)
-
-Launch:
-    langgraph dev --config langgraph.json --port 2024
+This agent provides financial analysis and loan calculations using tools 
+dynamically discovered via the Model Context Protocol (MCP). It features 
+a specialized security router to intercept and block forbidden content 
+(virus detections) from tool responses.
 """
 
 from __future__ import annotations
-from pprint import pprint
-import logging
+
 import os
 import asyncio
+import logging
+from typing import Annotated, TypedDict, List, Dict, Any
 
 from langchain_ollama import ChatOllama
-from langgraph.prebuilt import create_react_agent
+from langchain_core.messages import BaseMessage, ToolMessage
+from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import ToolNode
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO, 
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s"
 )
 logger = logging.getLogger("FinanceAgent")
 
+
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 FINANCE_MODEL = os.getenv("FINANCE_MODEL", "llama3.2")
-LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "sk-1234")  #\
+LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "sk-1234")
 
+
+
+class AgentState(TypedDict):
+    """
+    State schema for the finance agent.
+    
+    Attributes:
+        messages: Ongoing list of conversation messages.
+    """
+    messages: Annotated[List[BaseMessage], "The messages in the conversation"]
+
+
+
+def get_mcp_tools():
+    """
+    Synchronously fetches tools from the MCP server.
+    
+    This function handles the event loop lifecycle to ensure tool discovery 
+    succeeds even when called from within non-async thread pools used 
+    by the LangGraph runtime.
+    
+    Returns:
+        List of discovered LangChain tools.
+    """
+    server_config = {
+        "finance": {
+            "transport": "streamable_http",
+            "url": "http://host.docker.internal:4000/MCPFinance/mcp",
+            "headers": {"x-litellm-api-key": f"Bearer {LITELLM_API_KEY}"}
+        }
+    }
+    
+    async def discover():
+        client = MultiServerMCPClient(server_config)
+        return await client.get_tools()
+
+    try:
+        return asyncio.run(discover())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(discover())
+    except Exception as e:
+        logger.error(f"Critical failure during MCP tool discovery: {e}")
+        return []
+
+
+
+mcp_tools = get_mcp_tools()
 llm = ChatOllama(
     model=FINANCE_MODEL,
     base_url=OLLAMA_BASE_URL,
     temperature=0,
-    disable_streaming=True
-)
+).bind_tools(mcp_tools)
 
-mcp_client = None
 
-async def load_mcp_tools():
-    """Connect to the MCP server and fetch tools dynamically."""
-    global mcp_client
-    server_config = {
-        "finance": {
-            "transport": "streamable_http",  
-            "url": "http://host.docker.internal:4000/MCPFinance/mcp",
-            "headers": {
-                "x-litellm-api-key": f"Bearer {LITELLM_API_KEY}"
-            }
-        }
-    }
-    try:
-        mcp_client = MultiServerMCPClient(server_config)
-        tools = await mcp_client.get_tools()
-        logger.info(f"Discovered {len(tools)} tools via MCP:")
-        for tool in tools:
-            logger.info(f" - {tool.name}: {pprint(tool.args_schema)}")
-        return tools
-    except Exception as e:
-        logger.error(f"Failed to connect to MCP server: {e}")
-        return []
 
+def call_model(state: AgentState):
+    """
+    Passes the current state to the LLM to determine the next message or tool call.
     
-try:
-    tools = asyncio.run(load_mcp_tools())
-except Exception as e:
-    logger.error(f"Initialization failed: {e}")
-    tools = []
+    Returns:
+        Update to the state messages.
+    """
+    response = llm.invoke(state["messages"])
+    return {"messages": [response]}
+
+def router(state: AgentState):
+    """
+    Routes the execution flow based on the most recent message.
+    
+    Implements security logic to terminate the graph immediately if 
+    'Forbidden content: virus found' is detected in a tool response.
+    
+    Returns:
+        Destination node name or END.
+    """
+    last_message = state["messages"][-1]
+    
+    if isinstance(last_message, ToolMessage):
+        if "AIShield Content blocked" in str(last_message.content):
+            logger.warning("Security Interceptor: Virus detected. Stopping graph.")
+            return END
+    
+    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        return "tools"
+    
+    return END
 
 
-graph = create_react_agent(
-    llm,
-    tools=tools,
+
+builder = StateGraph(AgentState)
+
+builder.add_node("agent", call_model)
+builder.add_node("tools", ToolNode(mcp_tools))
+
+builder.set_entry_point("agent")
+
+builder.add_conditional_edges(
+    "agent",
+    router,
+    {
+        "tools": "tools", 
+        END: END
+    }
 )
 
-logger.info("Finance ReAct Agent initialized with MCP auto-discovery")
+builder.add_conditional_edges(
+    "tools",
+    router,
+    {
+        "agent": "agent", 
+        END: END
+    }
+)
+
+graph = builder.compile()
