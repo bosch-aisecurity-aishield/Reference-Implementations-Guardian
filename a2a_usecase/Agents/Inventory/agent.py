@@ -197,9 +197,11 @@ async def _call_mcp_sql(query: str) -> str:
         JSON string with query results
     """
     client = build_mcp_client()
+    print(f"Executing SQL query: {query}") 
     try:
         async with client.session("inventory") as session:
             res = await session.call_tool("run_sql_query", arguments={"query": query})
+            
             if getattr(res, "content", None) and hasattr(res.content[0], "text"):
                 return res.content[0].text
             return str(res)
