@@ -326,10 +326,11 @@ async def _a2a_call(
     }
 
     timeout = aiohttp.ClientTimeout(
-        total=timeout_total_s,
-        sock_connect=10.0,
-        sock_read=timeout_total_s,
-    )
+    total=300.0,
+    connect=10.0,
+    sock_connect=10.0,
+    sock_read=300.0,
+)
 
     owns_session = session is None
     if owns_session:
