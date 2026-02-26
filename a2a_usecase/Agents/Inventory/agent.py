@@ -201,7 +201,7 @@ async def _call_mcp_sql(query: str) -> str:
     try:
         async with client.session("inventory") as session:
             res = await session.call_tool("run_sql_query", arguments={"query": query})
-            
+            print(f"MCP SQL raw response: {res}")
             if getattr(res, "content", None) and hasattr(res.content[0], "text"):
                 return res.content[0].text
             return str(res)
