@@ -21,11 +21,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
-# Load environment variables from .env file if it exists
-_env_path = Path(__file__).resolve().parent.parent / ".env"
-if _env_path.exists():
-    load_dotenv(_env_path)
-
 mcp = FastMCP("Inventory Service")
 
 
