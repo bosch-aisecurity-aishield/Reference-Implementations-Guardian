@@ -461,6 +461,7 @@ async def summarizer_node(state: State) -> Dict[str, Any]:
             {"role": "system", "content": prompt},
             {"role": "user", "content": state.user_intent},
         ])
+        print(f"Summarizer raw response: {response.content}")
         try:
             text_reply = json.loads(response.content).get("message", str(response.content))
         except:
@@ -485,6 +486,7 @@ async def summarizer_node(state: State) -> Dict[str, Any]:
     else:
         final_message = AIMessage(content=text_reply)
         logger.debug("Returning text-only response")
+    print(f"Final message content: {final_message.content[:200]}")
     
     return {"messages": [final_message]}
 
