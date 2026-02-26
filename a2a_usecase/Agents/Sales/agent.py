@@ -25,6 +25,8 @@ import json
 import io
 import os
 import uuid
+import time
+import random
 import logging
 from PIL import Image
 from dataclasses import dataclass, field
@@ -55,6 +57,8 @@ SPECIALIST_AID = {
     "inventory":  os.getenv("INVENTORY_A2A_AID", "AIS:InventoryAgent"),
     "finance": os.getenv("FINANCE_A2A_AID", "AIS:FinanceAgent"),
 }
+
+TRANSIENT_STATUS = {429, 502, 503, 504}
 
 class Context(TypedDict):
     """Configuration context passed at runtime."""
@@ -172,110 +176,288 @@ def compress_base64_image(base64_string: str, max_size: int = 800) -> str:
              return f"{header}base64,{data}"
         return base64_string
 
-async def _a2a_call(base_url: str, text: str, aid: str, api_key: str = None) -> Dict[str, Any]:
-    """Execute A2A JSON-RPC call to a specialist agent."""
-    base = base_url.rstrip("/")
-    headers = {"x-api-key": api_key, "x-caller-agent": ROOT_AGENT_IDENTIFIER} if api_key else {}
-    aishield_headers = _get_aishield_headers()
-    if aishield_headers:
-        headers["x-aishield-trace-id"] = aishield_headers
-        logger.info(f"Forwarding AISHIELD trace ID: {aishield_headers}")
-    try:
-        async with aiohttp.ClientSession() as session:
+def _merge_aishield_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    aishield = _get_aishield_headers()
+    if not aishield:
+        return headers
+    if isinstance(aishield, dict):
+        headers.update({str(k): str(v) for k, v in aishield.items()})
+    else:
+        headers["x-aishield-trace-id"] = str(aishield)
+    return headers
 
-            payload = {
-                "jsonrpc": "2.0",
-                "id": str(uuid.uuid4()),
-                "method": "message/send",
-                "params": {
-                    "message": {
-                        "role": "user",
-                        "parts": [{"kind": "text", "text": text}],
-                        "messageId": str(uuid.uuid4()),
-                    }
-                },
-            }
+
+# async def _a2a_call(base_url: str, text: str, aid: str, api_key: str = None) -> Dict[str, Any]:
+#     """Execute A2A JSON-RPC call to a specialist agent."""
+#     base = base_url.rstrip("/")
+#     headers = {"x-api-key": api_key, "x-caller-agent": ROOT_AGENT_IDENTIFIER} if api_key else {}
+#     aishield_headers = _get_aishield_headers()
+#     if aishield_headers:
+#         headers["x-aishield-trace-id"] = aishield_headers
+#         logger.info(f"Forwarding AISHIELD trace ID: {aishield_headers}")
+#     try:
+#         async with aiohttp.ClientSession() as session:
+
+#             payload = {
+#                 "jsonrpc": "2.0",
+#                 "id": str(uuid.uuid4()),
+#                 "method": "message/send",
+#                 "params": {
+#                     "message": {
+#                         "role": "user",
+#                         "parts": [{"kind": "text", "text": text}],
+#                         "messageId": str(uuid.uuid4()),
+#                     }
+#                 },
+#             }
             
-            async with session.post(f"{base}/a2a/{aid}", json=payload, headers=headers) as resp:
-                resp.raise_for_status()
-                result = await resp.json()
+#             async with session.post(f"{base}/a2a/{aid}", json=payload, headers=headers) as resp:
+#                 resp.raise_for_status()
+#                 result = await resp.json()
 
-        response_text = "(No text response)"
-        image_data = []
-        with open("debug_a2a_response.json", "w") as f:
-            json.dump(result, f, indent=2)
+#         response_text = "(No text response)"
+#         image_data = []
+#         with open("debug_a2a_response.json", "w") as f:
+#             json.dump(result, f, indent=2)
         
-        artifacts = result.get("result", {}).get("artifacts", [])
+#         artifacts = result.get("result", {}).get("artifacts", [])
 
-        status_msg = (result.get("result", {}).get("status") or {}).get("message")
+#         status_msg = (result.get("result", {}).get("status") or {}).get("message")
         
-        logger.info(f"[A2A Response] artifacts count: {len(artifacts)}, has status: {bool(status_msg)}")
-        sources = artifacts if artifacts else ([status_msg] if status_msg else [])
-        if sources and isinstance(sources, list) and len(sources) > 0:
-            for idx, source in enumerate(sources):
-                parts = source.get("parts", []) if source else []
-                for part_idx, part in enumerate(parts):
-                    part_type = part.get("kind") or part.get("type")
-                    logger.info(f"[A2A Part {idx}.{part_idx}] type={part_type}, keys={list(part.keys())}")
-                    if part_type == "text":
-                        raw_text = part.get("text", "")
-                        logger.info(f"[A2A Part {idx}.{part_idx}] Got text: {len(raw_text)} chars")
+#         logger.info(f"[A2A Response] artifacts count: {len(artifacts)}, has status: {bool(status_msg)}")
+#         sources = artifacts if artifacts else ([status_msg] if status_msg else [])
+#         if sources and isinstance(sources, list) and len(sources) > 0:
+#             for idx, source in enumerate(sources):
+#                 parts = source.get("parts", []) if source else []
+#                 for part_idx, part in enumerate(parts):
+#                     part_type = part.get("kind") or part.get("type")
+#                     logger.info(f"[A2A Part {idx}.{part_idx}] type={part_type}, keys={list(part.keys())}")
+#                     if part_type == "text":
+#                         raw_text = part.get("text", "")
+#                         logger.info(f"[A2A Part {idx}.{part_idx}] Got text: {len(raw_text)} chars")
                         
-                        try:
-                            parsed = json.loads(raw_text)
-                            if isinstance(parsed, dict) and "images" in parsed:
-                                response_text = parsed.get("text", "")
-                                image_data.extend(parsed.get("images", []))
-                                logger.info(f"[A2A Part {idx}.{part_idx}] ✓ Parsed JSON: text={len(response_text)} chars, images={len(parsed['images'])}")
-                            else:
-                                response_text = raw_text
-                        except (json.JSONDecodeError, TypeError):
-                            response_text = raw_text
-                    elif part_type == "image_url":
-                        url = part.get("image_url", {}).get("url")
-                        logger.info(f"[A2A Part {idx}.{part_idx}] image_url field: {url[:80] if url else 'None'}...")
-                        if url:
-                            if url.startswith("data:image/"):
-                                image_data.append(url)
-                                logger.info(f"[A2A Part {idx}.{part_idx}] ✓ Added base64 data URI")
-                            else:
-                                image_data.append(url)
-                                logger.info(f"[A2A Part {idx}.{part_idx}] ✓ Added URL")
-        else:
-            logger.warning(f"No artifacts or status message found in A2A response.")
-            parts = result.get("result", {}).get("message", {}).get("parts", [])
-            parts = json.loads(parts) if isinstance(parts, str) else parts
-            text_parts = []
-            for idx, part in enumerate(parts):
-                logger.info(f"[A2A Fallback Part {idx}] keys={list(part.keys())}")
-                part = part.get("text", {}) if isinstance(part, dict) else {}
-                if "images" in part or "image_url" in part:
-                    part = json.loads(part) if isinstance(part, str) else part
-                    img_part = part.get("images") or part.get("image_url")
-                    for img in (img_part if isinstance(img_part, list) else []):
-                        logger.info(f"[A2A Fallback Part {idx}] Found image: {img[:80]}...")
-                        if img.startswith("data:image/"):
-                            image_data.append(img)
-                            logger.info(f"[A2A Fallback Part {idx}]  Added base64 data URI")
+#                         try:
+#                             parsed = json.loads(raw_text)
+#                             if isinstance(parsed, dict) and "images" in parsed:
+#                                 response_text = parsed.get("text", "")
+#                                 image_data.extend(parsed.get("images", []))
+#                                 logger.info(f"[A2A Part {idx}.{part_idx}] ✓ Parsed JSON: text={len(response_text)} chars, images={len(parsed['images'])}")
+#                             else:
+#                                 response_text = raw_text
+#                         except (json.JSONDecodeError, TypeError):
+#                             response_text = raw_text
+#                     elif part_type == "image_url":
+#                         url = part.get("image_url", {}).get("url")
+#                         logger.info(f"[A2A Part {idx}.{part_idx}] image_url field: {url[:80] if url else 'None'}...")
+#                         if url:
+#                             if url.startswith("data:image/"):
+#                                 image_data.append(url)
+#                                 logger.info(f"[A2A Part {idx}.{part_idx}] ✓ Added base64 data URI")
+#                             else:
+#                                 image_data.append(url)
+#                                 logger.info(f"[A2A Part {idx}.{part_idx}] ✓ Added URL")
+#         else:
+#             logger.warning(f"No artifacts or status message found in A2A response.")
+#             parts = result.get("result", {}).get("message", {}).get("parts", [])
+#             parts = json.loads(parts) if isinstance(parts, str) else parts
+#             text_parts = []
+#             for idx, part in enumerate(parts):
+#                 logger.info(f"[A2A Fallback Part {idx}] keys={list(part.keys())}")
+#                 part = part.get("text", {}) if isinstance(part, dict) else {}
+#                 if "images" in part or "image_url" in part:
+#                     part = json.loads(part) if isinstance(part, str) else part
+#                     img_part = part.get("images") or part.get("image_url")
+#                     for img in (img_part if isinstance(img_part, list) else []):
+#                         logger.info(f"[A2A Fallback Part {idx}] Found image: {img[:80]}...")
+#                         if img.startswith("data:image/"):
+#                             image_data.append(img)
+#                             logger.info(f"[A2A Fallback Part {idx}]  Added base64 data URI")
+#                         else:
+#                             image_data.append(img)
+#                             logger.info(f"[A2A Fallback Part {idx}]  Added URL")
+#                     if "text" in part:
+#                         text = part.get("text") if isinstance(part, dict) else None
+#                         if text:
+#                             text = json.loads(text) if isinstance(text, str) else text
+#                             text_parts.append(text.get("description", "") if isinstance(text, dict) else text)
+#                 else:
+#                     text_parts.append(part)
+#             response_text = "\n".join(text_parts)
+
+
+#         logger.info(f"[A2A Extraction Complete] text={len(response_text)} chars, images={len(image_data)}")
+#         return {"text": response_text, "images": image_data}
+
+#     except Exception as e:
+#         logger.error(f"A2A Call Failed: {e}")
+#         return {"text": "I'm having trouble connecting to that department right now.", "images": []}
+
+async def _a2a_call(
+    base_url: str,
+    text: str,
+    aid: str,
+    api_key: str = None,
+    session: Optional[aiohttp.ClientSession] = None,
+    max_retries: int = 2,
+    timeout_total_s: float = 60.0,
+) -> Dict[str, Any]:
+    """Execute A2A JSON-RPC call to a specialist agent with timeouts + retries."""
+    base = base_url.rstrip("/")
+
+    headers: Dict[str, str] = {}
+    if api_key:
+        headers.update({
+            "x-api-key": api_key,
+            "x-caller-agent": ROOT_AGENT_IDENTIFIER,
+        })
+    headers = _merge_aishield_headers(headers)
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": str(uuid.uuid4()),
+        "method": "message/send",
+        "params": {
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": text}],
+                "messageId": str(uuid.uuid4()),
+            }
+        },
+    }
+
+    timeout = aiohttp.ClientTimeout(
+        total=timeout_total_s,
+        sock_connect=10.0,
+        sock_read=timeout_total_s,
+    )
+
+    owns_session = session is None
+    if owns_session:
+        connector = aiohttp.TCPConnector(limit=50, ttl_dns_cache=300)
+        session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+
+    try:
+        url = f"{base}/a2a/{aid}"
+
+        last_err: Optional[Exception] = None
+        for attempt in range(max_retries + 1):
+            start = time.perf_counter()
+            try:
+                async with session.post(url, json=payload, headers=headers) as resp:
+                    # Capture body for debugging on errors
+                    raw_body = await resp.text()
+                    elapsed = time.perf_counter() - start
+
+                    if resp.status in TRANSIENT_STATUS and attempt < max_retries:
+                        retry_after = resp.headers.get("Retry-After")
+                        if retry_after:
+                            sleep_s = float(retry_after)
                         else:
-                            image_data.append(img)
-                            logger.info(f"[A2A Fallback Part {idx}]  Added URL")
-                    if "text" in part:
-                        text = part.get("text") if isinstance(part, dict) else None
-                        if text:
-                            text = json.loads(text) if isinstance(text, str) else text
-                            text_parts.append(text.get("description", "") if isinstance(text, dict) else text)
+                            # exp backoff + jitter
+                            sleep_s = (2 ** attempt) + random.random()
+                        logger.warning(
+                            f"A2A transient HTTP {resp.status} from {url} in {elapsed:.2f}s; "
+                            f"retrying in {sleep_s:.2f}s (attempt {attempt+1}/{max_retries})"
+                        )
+                        await asyncio.sleep(sleep_s)
+                        continue
+
+                    if resp.status >= 400:
+                        logger.error(
+                            f"A2A HTTP {resp.status} from {url} in {elapsed:.2f}s. "
+                            f"Body (truncated): {raw_body[:2000]}"
+                        )
+                        resp.raise_for_status()
+
+                    # Normal success path
+                    result = json.loads(raw_body)
+
+                response_text = "(No text response)"
+                image_data = []
+
+                artifacts = result.get("result", {}).get("artifacts", [])
+                status_msg = (result.get("result", {}).get("status") or {}).get("message")
+
+                logger.info(f"[A2A Response] artifacts count: {len(artifacts)}, has status: {bool(status_msg)}")
+                sources = artifacts if artifacts else ([status_msg] if status_msg else [])
+
+                if sources and isinstance(sources, list) and len(sources) > 0:
+                    for idx, source in enumerate(sources):
+                        parts = source.get("parts", []) if source else []
+                        for part_idx, part in enumerate(parts):
+                            part_type = part.get("kind") or part.get("type")
+                            logger.info(f"[A2A Part {idx}.{part_idx}] type={part_type}, keys={list(part.keys())}")
+
+                            if part_type == "text":
+                                raw_text = part.get("text", "")
+                                logger.info(f"[A2A Part {idx}.{part_idx}] Got text: {len(raw_text)} chars")
+
+                                try:
+                                    parsed = json.loads(raw_text)
+                                    if isinstance(parsed, dict) and "images" in parsed:
+                                        response_text = parsed.get("text", "")
+                                        image_data.extend(parsed.get("images", []))
+                                        logger.info(
+                                            f"[A2A Part {idx}.{part_idx}] ✓ Parsed JSON: "
+                                            f"text={len(response_text)} chars, images={len(parsed['images'])}"
+                                        )
+                                    else:
+                                        response_text = raw_text
+                                except (json.JSONDecodeError, TypeError):
+                                    response_text = raw_text
+
+                            elif part_type == "image_url":
+                                url = part.get("image_url", {}).get("url")
+                                logger.info(f"[A2A Part {idx}.{part_idx}] image_url field: {url[:80] if url else 'None'}...")
+                                if url:
+                                    image_data.append(url)
+
                 else:
-                    text_parts.append(part)
-            response_text = "\n".join(text_parts)
+                    logger.warning("No artifacts or status message found in A2A response.")
+                    parts = result.get("result", {}).get("message", {}).get("parts", [])
+                    parts = json.loads(parts) if isinstance(parts, str) else parts
+                    text_parts = []
 
+                    for idx, part in enumerate(parts):
+                        logger.info(f"[A2A Fallback Part {idx}] keys={list(part.keys())}")
+                        part = part.get("text", {}) if isinstance(part, dict) else {}
+                        if "images" in part or "image_url" in part:
+                            part = json.loads(part) if isinstance(part, str) else part
+                            img_part = part.get("images") or part.get("image_url")
+                            for img in (img_part if isinstance(img_part, list) else []):
+                                image_data.append(img)
+                            if "text" in part:
+                                t = part.get("text")
+                                if t:
+                                    t = json.loads(t) if isinstance(t, str) else t
+                                    text_parts.append(t.get("description", "") if isinstance(t, dict) else t)
+                        else:
+                            text_parts.append(part)
 
-        logger.info(f"[A2A Extraction Complete] text={len(response_text)} chars, images={len(image_data)}")
-        return {"text": response_text, "images": image_data}
+                    response_text = "\n".join([p for p in text_parts if p])
 
-    except Exception as e:
-        logger.error(f"A2A Call Failed: {e}")
+                logger.info(f"[A2A Extraction Complete] text={len(response_text)} chars, images={len(image_data)}")
+                return {"text": response_text, "images": image_data}
+
+            except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError, asyncio.TimeoutError, aiohttp.ClientResponseError) as e:
+                elapsed = time.perf_counter() - start
+                last_err = e
+                if attempt < max_retries:
+                    sleep_s = (2 ** attempt) + random.random()
+                    logger.warning(
+                        f"A2A exception {type(e).__name__} after {elapsed:.2f}s; "
+                        f"retrying in {sleep_s:.2f}s (attempt {attempt+1}/{max_retries})"
+                    )
+                    await asyncio.sleep(sleep_s)
+                    continue
+                break
+
+        logger.error(f"A2A Call Failed after retries: {last_err}")
         return {"text": "I'm having trouble connecting to that department right now.", "images": []}
+
+    finally:
+        if owns_session:
+            await session.close()
 
 async def _analyze_images(image_data: List[str], query: str) -> str:
     """Run Vision LLM on images if present.
