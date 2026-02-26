@@ -27,13 +27,13 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      - "8002:8002"
     # env_file:
     #   - ./InventoryMCP/.env
     environment:
       POSTGRES_DSN: "dbname=dealership user=admin password=password123 host=postgres port=5432"
       CHROMA_PERSIST_DIR: "/app/chroma_data"
-      MCP_PORT: "8000"
+      MCP_PORT: "8002"
     volumes:
       - ./InventoryMCP/chroma_data:/app/chroma_data
     restart: unless-stopped
