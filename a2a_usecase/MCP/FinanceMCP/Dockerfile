@@ -22,4 +22,4 @@ ENV MCP_HOST=0.0.0.0 \
     MCP_PORT=8000
 
 # Run your MCP server
-CMD ["python", "-m", "mcp_server.py"]
+CMD ["python", "-m", "mcp_server"]
