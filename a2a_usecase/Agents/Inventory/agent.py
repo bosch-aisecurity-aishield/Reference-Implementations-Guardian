@@ -204,7 +204,6 @@ async def _call_mcp_sql(query: str) -> str:
             print(f"MCP SQL raw response: {res}")
             if getattr(res, "content", None) and hasattr(res.content[0], "text"):
                 return res.content[0].text
-            return str(res)
     except Exception as e:
         logger.error(f"MCP SQL call failed: {e}")
         return json.dumps({"error": str(e)})

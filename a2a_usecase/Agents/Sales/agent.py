@@ -299,7 +299,7 @@ async def _a2a_call(
     api_key: str = None,
     session: Optional[aiohttp.ClientSession] = None,
     max_retries: int = 2,
-    timeout_total_s: float = 60.0,
+    timeout_total_s: float = 300.0,
 ) -> Dict[str, Any]:
     """Execute A2A JSON-RPC call to a specialist agent with timeouts + retries."""
     base = base_url.rstrip("/")
