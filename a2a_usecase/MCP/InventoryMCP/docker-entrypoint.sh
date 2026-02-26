@@ -2,21 +2,24 @@
 set -e
 
 echo "🚀 Starting inventory MCP container..."
-
-# Load .env into environment (if present)
-if [ -f /app/.env ]; then
-  echo "📄 Loading environment from /app/.env"
-  set -a
-  . /app/.env
-  set +a
-fi
+echo "📄 Using environment variables from Docker Compose"
 
 echo "⏳ Waiting for PostgreSQL to be reachable..."
 python - <<'PY'
-import os, time, psycopg2
+import os, time, psycopg2, re
+
 dsn = os.getenv("POSTGRES_DSN")
 if not dsn:
     raise SystemExit("❌ POSTGRES_DSN is not set")
+
+# Optional safety warning
+if "localhost" in dsn or "127.0.0.1" in dsn:
+    print("⚠️ Warning: POSTGRES_DSN points to localhost/127.0.0.1. In Docker, use host=postgres (service name).")
+
+# Mask password in logs (supports URL and key=value styles loosely)
+masked = re.sub(r'://([^:/@\s]+):([^@/\s]+)@', r'://\1:***@', dsn)
+masked = re.sub(r'(password=)(\S+)', r'\1***', masked)
+print(f"🔎 POSTGRES_DSN detected: {masked}")
 
 for i in range(30):
     try:
@@ -35,7 +38,7 @@ echo "🗄️ Running DB seed..."
 python /app/setup_db.py
 
 echo "🧠 Running RAG seed..."
-python /app/setup_rag.py   # or setup_rag.py if that's your actual filename
+python /app/setup_rag.py
 
 echo "🌐 Starting MCP server..."
 python /app/mcp_server.py
