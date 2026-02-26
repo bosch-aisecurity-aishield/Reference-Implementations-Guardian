@@ -56,7 +56,7 @@ logger = logging.getLogger("InventoryAgent")
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 INVENTORY_MODEL = os.getenv("INVENTORY_MODEL", "qwen2.5-coder")
 LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "your_litellm_api_key_here")
 INVENTORY_MCP_SERVER_URL = os.getenv("INVENTORY_MCP_SERVER_URL", "http://localhost:8000")

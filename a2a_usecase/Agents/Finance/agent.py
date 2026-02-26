@@ -28,7 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger("FinanceAgent")
 
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 FINANCE_MODEL = os.getenv("FINANCE_MODEL", "llama3.2")
 LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "sk-1234")
 FINANCE_MCP_SERVER_URL = os.getenv("FINANCE_MCP_SERVER_URL", "http://host.docker.internal:4000/MCPFinance/mcp")
