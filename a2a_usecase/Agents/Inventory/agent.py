@@ -44,7 +44,7 @@ from langchain_ollama import ChatOllama
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import RetryPolicy
 from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
 # ── Logging Setup ────────────────────────────────────────────────────────────
 
@@ -173,15 +173,20 @@ Question: {query}
 Respond ONLY with JSON: {{ "message": "<your text>" }}
 """
 
-server_config = {
-    "finance": {
-        "transport": "streamable_http",
-        "url": INVENTORY_MCP_SERVER_URL,
-        "headers": {"x-litellm-api-key": f"Bearer {LITELLM_API_KEY}"}
-    }
-}
+def build_mcp_client() -> MultiServerMCPClient:
+    # If you have multiple MCP servers, add more entries here.
+    return MultiServerMCPClient(
+        {
+            "inventory": {
+                "transport": "streamable_http",
+                "url": INVENTORY_MCP_SERVER_URL,
+                "headers": {
+                    "x-litellm-api-key": f"Bearer {LITELLM_API_KEY}",
+                },
+            }
+        }
+    )
 
-# ── Core Agent Logic ─────────────────────────────────────────────────────────
 async def _call_mcp_sql(query: str) -> str:
     """Execute SQL query via MCP server over streamable HTTP.
 
@@ -191,31 +196,16 @@ async def _call_mcp_sql(query: str) -> str:
     Returns:
         JSON string with query results
     """
-    cfg = server_config["finance"]
-    print(f"Calling MCP SQL with query: {query}")
-
+    client = build_mcp_client()
     try:
-        async with streamable_http_client(
-            url=cfg["url"],
-            headers=cfg.get("headers", {})
-        ) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-
-                res = await session.call_tool(
-                    "run_sql_query",
-                    arguments={"query": query}
-                )
-                print(f"MCP SQL response: {res}")
-
-                if getattr(res, "content", None) and hasattr(res.content[0], "text"):
-                    return res.content[0].text
-                return str(res)
-
+        async with client.session("inventory") as session:
+            res = await session.call_tool("run_sql_query", arguments={"query": query})
+            if getattr(res, "content", None) and hasattr(res.content[0], "text"):
+                return res.content[0].text
+            return str(res)
     except Exception as e:
         logger.error(f"MCP SQL call failed: {e}")
         return json.dumps({"error": str(e)})
-
 
 async def _call_mcp_rag(query: str, max_results: int = 5) -> Tuple[str, List[str]]:
     """Execute RAG vector search via MCP server over streamable HTTP.
@@ -227,40 +217,31 @@ async def _call_mcp_rag(query: str, max_results: int = 5) -> Tuple[str, List[str
     Returns:
         Tuple of (raw_data_json, list_of_base64_images)
     """
-    cfg = server_config["finance"]
-
+    client = build_mcp_client()
     try:
-        async with streamable_http_client(
-            url=cfg["url"],
-            headers=cfg.get("headers", {})
-        ) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
+        async with client.session("inventory") as session:
+            res = await session.call_tool(
+                "search_vehicle_images",
+                arguments={"query": query, "max_results": max_results},
+            )
 
-                res = await session.call_tool(
-                    "search_vehicle_images",
-                    arguments={"query": query, "max_results": max_results}
-                )
+            raw = (
+                res.content[0].text
+                if getattr(res, "content", None) and hasattr(res.content[0], "text")
+                else str(res)
+            )
 
-                raw_data = (
-                    res.content[0].text
-                    if getattr(res, "content", None) and hasattr(res.content[0], "text")
-                    else str(res)
-                )
+            images: List[str] = []
+            try:
+                data = json.loads(raw)
+                for r in data.get("results", []):
+                    b64 = r.get("image_base64", "")
+                    if b64 and not b64.startswith("ERROR"):
+                        images.append(b64)
+            except json.JSONDecodeError:
+                pass
 
-                images: List[str] = []
-                try:
-                    data_json = json.loads(raw_data)
-                    if "results" in data_json:
-                        for result in data_json["results"]:
-                            img_b64 = result.get("image_base64", "")
-                            if img_b64 and not img_b64.startswith("ERROR"):
-                                images.append(img_b64)
-                except json.JSONDecodeError:
-                    pass
-
-                return raw_data, images
-
+            return raw, images
     except Exception as e:
         logger.error(f"MCP RAG call failed: {e}")
         return json.dumps({"error": str(e)}), []
