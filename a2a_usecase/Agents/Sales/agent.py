@@ -423,6 +423,11 @@ async def _a2a_call(
                         logger.info(f"[A2A Fallback Part {idx}] keys={list(part.keys())}")
                         part = part.get("text", {}) if isinstance(part, dict) else {}
                         if "images" in part or "image_url" in part:
+                            pprint("*" * 20)
+                            print()
+                            pprint(part)
+                            print()
+                            pprint("*" * 20)
                             part = json.loads(part) if isinstance(part, str) else part
                             img_part = part.get("images") or part.get("image_url")
                             for img in (img_part if isinstance(img_part, list) else []):
