@@ -428,6 +428,8 @@ async def _a2a_call(
                             pprint(part)
                             print()
                             pprint("*" * 20)
+                            with open("part.txt", "w+") as f:
+                                f.write(part)
                             part = json.loads(part) if isinstance(part, str) else part
                             img_part = part.get("images") or part.get("image_url")
                             for img in (img_part if isinstance(img_part, list) else []):
