@@ -438,7 +438,13 @@ async def _a2a_call(
                             if "text" in part:
                                 t = part.get("text")
                                 if t:
-                                    t = json.loads(t) if isinstance(t, str) else t
+                                    pprint(t)
+                                    if isinstance(t, str):
+                                        try:
+                                            t = json.loads(t)
+                                        except json.JSONDecodeError:
+                                            pass  # It's a normal string, keep it as is
+                                            
                                     text_parts.append(t.get("description", "") if isinstance(t, dict) else t)
                         else:
                             text_parts.append(part)
