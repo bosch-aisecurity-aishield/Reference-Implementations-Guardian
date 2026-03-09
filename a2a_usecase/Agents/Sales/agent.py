@@ -144,7 +144,7 @@ def _get_aishield_headers() -> dict:
         pass
     return None
 
-def compress_base64_image(base64_string: str, max_size: int = 800) -> str:
+def compress_base64_image(base64_string: str, max_size: int = 512) -> str:
     """
     Decodes a base64 image, resizes it to max_size (width/height), 
     and re-encodes it as a compressed JPEG to reduce string length.
@@ -166,7 +166,7 @@ def compress_base64_image(base64_string: str, max_size: int = 800) -> str:
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
             
-        img.save(buffer, format="JPEG", quality=60) 
+        img.save(buffer, format="JPEG", quality=40, optimize=True) 
         compressed_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
         
         return f"data:image/jpeg;base64,{compressed_data}"
