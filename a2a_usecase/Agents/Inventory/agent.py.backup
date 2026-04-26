@@ -1,14 +1,16 @@
 """Inventory Agent – Manual routing with MCP tool integration.
 
 This agent searches vehicle inventory using MCP-exposed tools via manual routing.
-The LLM determines the query type (SQL or direct) and the graph routes accordingly.
+The LLM determines the query type (SQL/RAG/combined) and the graph routes accordingly.
 
 MCP Tools (from mcp_server.py):
     - run_sql_query: Execute read-only SQL queries
+    - search_vehicle_images: Semantic visual search with max_results parameter
     - bulk_vehicle_search: Multi-filter search (make, model, color, price range, year, status)
     - get_vehicle_statistics: Aggregated counts and prices by dimension
     - get_available_makes_models: List all available makes and their models
     - search_by_price_range: Optimized price-based search
+    - get_vehicle_details_with_images: Complete vehicle profile (SQL+RAG combined)
 
 Architecture:
     - Uses manual StateGraph routing (compatible with qwen2.5-coder)
@@ -72,7 +74,11 @@ class State:
     route: str = "direct"
     query: str = ""
     user_intent: str = ""
+    sql_query: str = ""
+    rag_query: str = ""
     sql_data: str = ""
+    rag_data: str = ""
+    images: List[str] = field(default_factory=list)
 
 
 # ── LLM Setup ────────────────────────────────────────────────────────────────
@@ -92,59 +98,68 @@ DATABASE SCHEMA:
 Table: vehicles
 Columns:
   - vin (VARCHAR, PRIMARY KEY): Vehicle Identification Number
-  - make (VARCHAR): Manufacturer (e.g., 'Toyota', 'Honda', 'Ford', 'Chevrolet', 'BMW', 'Tesla')
-  - model (VARCHAR): Model name (e.g., 'Camry', 'Civic', 'F-150', 'Silverado', 'Model 3')
-  - year (INTEGER): Model year (e.g., 2023, 2024)
+  - make (VARCHAR): Manufacturer (e.g., 'Toyota', 'Honda', 'Ford', 'Chevrolet')
+  - model (VARCHAR): Model name (e.g., 'Camry', 'Civic', 'F-150', 'Silverado')
+  - year (INTEGER): Model year (e.g., 2020, 2021, 2022, 2023)
   - color (VARCHAR): Exterior color (e.g., 'Red', 'Blue', 'White', 'Black', 'Silver')
   - price (NUMERIC): Price in dollars (e.g., 25000.00, 35999.99)
-  - mileage (INTEGER): Odometer reading in miles (e.g., 0, 5000, 15000)
-  - transmission (VARCHAR): Transmission type ('Automatic', 'Manual')
-  - fuel_type (VARCHAR): Fuel type ('Gasoline', 'Diesel', 'Electric', 'Hybrid')
-  - body_type (VARCHAR): Vehicle category ('Sedan', 'SUV', 'Truck', 'Coupe', 'Hatchback', 'Minivan', 'Convertible')
-  - description (TEXT): Vehicle features and detailed description
   - status (VARCHAR): Availability ('AVAILABLE', 'SOLD', 'RESERVED')
-  - created_at (TIMESTAMP): Record creation timestamp
-  - updated_at (TIMESTAMP): Record update timestamp
 
 SQL TIPS:
 - Use ILIKE for case-insensitive string matching (e.g., WHERE color ILIKE 'red')
 - Use BETWEEN for price ranges (e.g., price BETWEEN 20000 AND 30000)
-- Use < or <= for mileage queries (e.g., mileage < 10000)
-- Use = for exact matches (e.g., transmission = 'Manual')
-- Combine conditions with AND/OR (e.g., fuel_type = 'Electric' AND price < 50000)
 
 ROUTES:
-1. **sql_only**: Factual queries about price, color, model, year, VIN, availability, stock, features, mileage, transmission, fuel type, body type
+1. **sql_only**: Factual queries about price, color, model, year, VIN, availability, stock
    Query format: Complete SQL SELECT statement using the vehicles table
-   Examples:
-   - "SELECT * FROM vehicles WHERE price < 30000 AND color ILIKE 'red' LIMIT 10"
-   - "SELECT * FROM vehicles WHERE fuel_type = 'Electric' AND status = 'AVAILABLE' ORDER BY price"
-   - "SELECT * FROM vehicles WHERE body_type = 'SUV' AND mileage < 10000 AND price BETWEEN 30000 AND 50000"
-   - "SELECT * FROM vehicles WHERE transmission = 'Manual' ORDER BY price LIMIT 5"
+   Example: "SELECT * FROM vehicles WHERE price < 30000 AND color ILIKE 'red' LIMIT 10"
 
-2. **direct**: Simple questions answerable without lookup (greetings, general info)
+2. **rag_only**: Visual/descriptive features like leather seats, dashboard design, sporty look
+   Query format: Natural language (e.g., "modern dashboard with touchscreen")
+
+3. **images_only**: Direct image requests without needing descriptions ("show me pictures", "images of")
+   Query format: Vehicle/feature description (e.g., "Honda Civic exterior")
+
+4. **combined**: Complex queries needing both data AND visuals (e.g., "red SUV under 40k with leather interior")
+   Query format: JSON with "sql" and "rag" keys
+   Example: {{"sql": "SELECT * FROM vehicles WHERE price <= 40000 AND color ILIKE '%red%' LIMIT 10", "rag": "SUV with leather interior"}}
+
+5. **direct**: Simple questions answerable without lookup (greetings, general info)
    Query format: Original text
 
 Respond ONLY with JSON:
 {{
-  "route": "sql_only" | "direct",
-  "query": "<formatted query based on route>"
+  "route": "sql_only" | "rag_only" | "images_only" | "combined" | "direct",
+  "query": "<formatted query based on route>",
+  "sql_query": "<Complete SQL SELECT statement if route is combined>",
+  "rag_query": "<RAG search phrase if route is combined>"
 }}
 """
 
 SQL_SUMMARIZE_PROMPT = """\
 You are an inventory assistant. Convert this database result into a customer-friendly response.
-Note: Data comes from vehicles table with columns: vin, make, model, year, color, price, mileage, 
-transmission, fuel_type, body_type, description, status, created_at, updated_at
+Note: Data comes from vehicles table with columns: vin, make, model, year, color, price, status
 Data: {data}
 
-Guidelines:
-- Highlight key features from the description field
-- Mention mileage if low (under 10k miles)
-- Note fuel type if Electric or Hybrid
-- Include transmission type if Manual (since most are Automatic)
-- Emphasize body_type to help customer understand vehicle category
-- Format prices with commas (e.g., $45,000)
+Respond ONLY with JSON: {{ "message": "<your text>" }}
+"""
+
+RAG_SUMMARIZE_PROMPT = """\
+You are an inventory assistant. Describe these vehicle features to the customer.
+
+Features: {data}
+Image Count: {image_count}
+
+Respond ONLY with JSON: {{ "message": "<your text>" }}
+"""
+
+COMBINED_SUMMARIZE_PROMPT = """\
+You are an inventory assistant. Combine factual data and visual features into one response.
+Note: SQL data is from vehicles table (vin, make, model, year, color, price, status)
+      Visual data is from image search describing vehicle features
+Database Info: {sql_data}
+Visual Features: {rag_data}
+Images Available: {image_count}
 
 Respond ONLY with JSON: {{ "message": "<your text>" }}
 """
@@ -193,6 +208,45 @@ async def _call_mcp_sql(query: str) -> str:
         logger.error(f"MCP SQL call failed: {e}")
         return json.dumps({"error": str(e)})
 
+async def _call_mcp_rag(query: str, max_results: int = 5) -> Tuple[str, List[str]]:
+    """Execute RAG vector search via MCP server over streamable HTTP.
+
+    Args:
+        query: Natural language search phrase
+        max_results: Maximum number of image results (1-20)
+
+    Returns:
+        Tuple of (raw_data_json, list_of_base64_images)
+    """
+    client = build_mcp_client()
+    try:
+        async with client.session("inventory") as session:
+            res = await session.call_tool(
+                "search_vehicle_images",
+                arguments={"query": query, "max_results": max_results},
+            )
+
+            raw = (
+                res.content[0].text
+                if getattr(res, "content", None) and hasattr(res.content[0], "text")
+                else str(res)
+            )
+
+            images: List[str] = []
+            try:
+                data = json.loads(raw)
+                for r in data.get("results", []):
+                    b64 = r.get("image_base64", "")
+                    if b64 and not b64.startswith("ERROR"):
+                        images.append(b64)
+            except json.JSONDecodeError:
+                pass
+
+            return raw, images
+    except Exception as e:
+        logger.error(f"MCP RAG call failed: {e}")
+        return json.dumps({"error": str(e)}), []
+
 async def router_node(state: State) -> Dict[str, Any]:
     """Analyze user intent and determine execution route.
     
@@ -222,11 +276,17 @@ async def router_node(state: State) -> Dict[str, Any]:
     
     logger.info(f"Route decision: {route}, Query: {query[:100] if isinstance(query, str) else query}")
     
-    return {
+    result = {
         "route": route,
         "query": query,
         "user_intent": user_text
     }
+    
+    if route == "combined":
+        result["sql_query"] = decision.get("sql_query", "")
+        result["rag_query"] = decision.get("rag_query", "")
+    
+    return result
 
 
 async def sql_node(state: State) -> Dict[str, Any]:
@@ -253,6 +313,97 @@ async def sql_node(state: State) -> Dict[str, Any]:
     return {"sql_data": sql_data}
 
 
+async def rag_node(state: State) -> Dict[str, Any]:
+    """Execute RAG vector search.
+    
+    Returns:
+        Updated state with rag_data and images
+    """
+    logger.info(f"RAG Node executing: {state.query[:100]}")
+    
+    try:
+        rag_data, images = await asyncio.wait_for(
+            _call_mcp_rag(state.query),
+            timeout=45.0
+        )
+        logger.info(f"RAG returned {len(rag_data)} chars, {len(images)} images")
+    except asyncio.TimeoutError:
+        rag_data = '{"error": "Search timed out"}'
+        images = []
+        logger.warning("RAG search timed out")
+    except Exception as exc:
+        logger.error(f"RAG search failed: {exc}")
+        rag_data = f'{{"error": "{str(exc)}"}}'
+        images = []
+    
+    return {"rag_data": rag_data, "images": images}
+
+
+async def images_only_node(state: State) -> Dict[str, Any]:
+    """Retrieve only images without text summarization.
+    
+    Returns:
+        Updated state with images and needs_summary=False
+    """
+    logger.info(f"Images-Only Node executing: {state.query[:100]}")
+    
+    try:
+        _, images = await asyncio.wait_for(
+            _call_mcp_rag(state.query),
+            timeout=45.0
+        )
+        logger.info(f"Images-Only returned {len(images)} images")
+    except Exception as exc:
+        logger.error(f"Image retrieval failed: {exc}")
+        images = []
+    
+    return {"images": images, "needs_summary": False}
+
+
+async def combined_node(state: State) -> Dict[str, Any]:
+    """Execute both SQL and RAG queries in parallel.
+    
+    Returns:
+        Updated state with sql_data, rag_data, and images
+    """
+    logger.info("Combined Node executing SQL + RAG")
+    
+    sql_query = state.sql_query or state.query
+    rag_query = state.rag_query or state.query
+    
+    # Handle dict query from router (combined route returns a dict)
+    if isinstance(sql_query, dict):
+        sql_query = sql_query.get('sql', '')
+    if isinstance(rag_query, dict):
+        rag_query = rag_query.get('rag', '')
+    
+    logger.info(f"SQL Query: {str(sql_query)[:100]}, RAG Query: {str(rag_query)[:100]}")
+    
+    sql_task = _call_mcp_sql(sql_query)
+    rag_task = _call_mcp_rag(rag_query)
+    
+    try:
+        results = await asyncio.gather(
+            asyncio.wait_for(sql_task, timeout=30.0),
+            asyncio.wait_for(rag_task, timeout=45.0),
+            return_exceptions=True
+        )
+        
+        sql_data = results[0] if not isinstance(results[0], Exception) else '{"error": "SQL failed"}'
+        rag_result = results[1] if not isinstance(results[1], Exception) else ('{"error": "RAG failed"}', [])
+        
+        rag_data, images = rag_result if isinstance(rag_result, tuple) else (str(rag_result), [])
+        
+        logger.info(f"Combined returned: SQL={len(sql_data)} chars, RAG={len(rag_data)} chars, Images={len(images)}")
+    except Exception as exc:
+        logger.error(f"Combined query failed: {exc}")
+        sql_data = '{"error": "Combined query failed"}'
+        rag_data = '{"error": "Combined query failed"}'
+        images = []
+    
+    return {"sql_data": sql_data, "rag_data": rag_data, "images": images}
+
+
 async def direct_node(state: State) -> Dict[str, Any]:
     """Handle simple queries without database lookup.
     
@@ -275,14 +426,35 @@ async def direct_node(state: State) -> Dict[str, Any]:
 
 
 async def summarizer_node(state: State) -> Dict[str, Any]:
-    """Summarize SQL query results.
+    """Summarize results based on route type.
     
     Returns:
-        Final response message
+        Final response message with optional images
     """
-    logger.info(f"Summarizer Node: route={state.route}")
+    logger.info(f"Summarizer Node: route={state.route}, images={len(state.images)}")
     
-    prompt = SQL_SUMMARIZE_PROMPT.format(data=state.sql_data)
+    if state.route == "sql_only":
+        prompt = SQL_SUMMARIZE_PROMPT.format(data=state.sql_data)
+    elif state.route == "rag_only":
+        prompt = RAG_SUMMARIZE_PROMPT.format(data=state.rag_data, image_count=len(state.images))
+    elif state.route == "combined":
+        prompt = COMBINED_SUMMARIZE_PROMPT.format(
+            sql_data=state.sql_data,
+            rag_data=state.rag_data,
+            image_count=len(state.images)
+        )
+    elif state.route == "images_only":
+        if state.images:
+            image_uris = [f"data:image/jpeg;base64,{img}" for img in state.images[:5]]
+            response_payload = {
+                "text": f"Here are {len(image_uris)} images matching your request.",
+                "images": image_uris
+            }
+            return {"messages": [AIMessage(content=json.dumps(response_payload))]}
+        else:
+            return {"messages": [AIMessage(content="No images found matching your request.")]}
+    else:
+        return {"messages": [AIMessage(content="Unable to process request.")]}
     
     try:
         response = await _llm.ainvoke([
@@ -298,8 +470,22 @@ async def summarizer_node(state: State) -> Dict[str, Any]:
         logger.error(f"Summarizer LLM failed: {e}")
         text_reply = "Here is the inventory data."
     
-    final_message = AIMessage(content=text_reply)
-    logger.debug("Returning response")
+    image_uris = []
+    if state.images:
+        for img in state.images[:2]:
+            if img.startswith("data:image"):
+                image_uris.append(img)
+            else:
+                image_uris.append(f"data:image/jpeg;base64,{img}")
+        response_payload = {
+            "text": text_reply,
+            "images": image_uris
+        }
+        final_message = AIMessage(content=json.dumps(response_payload))
+        logger.info(f"Returning response with {len(image_uris)} images")
+    else:
+        final_message = AIMessage(content=text_reply)
+        logger.debug("Returning text-only response")
     print(f"Final message content: {final_message.content[:200]}")
     
     return {"messages": [final_message]}
@@ -314,10 +500,29 @@ def route_from_router(state: State) -> str:
     Returns:
         Node name to execute next
     """
-    if state.route == "sql_only":
-        return "sql_executor"
+    route_map = {
+        "sql_only": "sql_executor",
+        "rag_only": "rag_executor",
+        "images_only": "images_retriever",
+        "combined": "combined_executor",
+        "direct": "direct_responder"
+    }
+    
+    next_node = route_map.get(state.route, "direct_responder")
+    logger.info(f"Routing to: {next_node}")
+    return next_node
+
+
+def should_summarize(state: State) -> str:
+    """Determine if summarization is needed.
+    
+    Returns:
+        "summarize" or "end"
+    """
+    if state.needs_summary:
+        return "summarize"
     else:
-        return "direct_responder"
+        return "end"
 
 
 # ── Graph Definition ─────────────────────────────────────────────────────────
@@ -334,6 +539,9 @@ builder = StateGraph(State)
 
 builder.add_node("router", router_node)
 builder.add_node("sql_executor", sql_node)
+builder.add_node("rag_executor", rag_node)
+builder.add_node("images_retriever", images_only_node)
+builder.add_node("combined_executor", combined_node)
 builder.add_node("direct_responder", direct_node)
 builder.add_node("summarizer", summarizer_node)
 
@@ -344,11 +552,26 @@ builder.add_conditional_edges(
     route_from_router,
     {
         "sql_executor": "sql_executor",
+        "rag_executor": "rag_executor",
+        "images_retriever": "images_retriever",
+        "combined_executor": "combined_executor",
         "direct_responder": "direct_responder"
     }
 )
 
 builder.add_edge("sql_executor", "summarizer")
+builder.add_edge("rag_executor", "summarizer")
+builder.add_edge("combined_executor", "summarizer")
+
+builder.add_conditional_edges(
+    "images_retriever",
+    should_summarize,
+    {
+        "summarize": "summarizer",
+        "end": END
+    }
+)
+
 builder.add_edge("direct_responder", END)
 builder.add_edge("summarizer", END)
 

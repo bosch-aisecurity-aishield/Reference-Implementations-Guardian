@@ -8,7 +8,7 @@ Architecture:
     1. Orchestrator Node: Analyzes input and determines the 'next_step'.
     2. Conditional Edge: Routes based on 'next_step'.
     3. Worker Nodes:
-       - Inventory Node: Calls Inventory Agent via A2A.
+       - Inventory Node: Calls Inventory Agent via A2A + runs Vision Analysis.
        - Finance Node: Calls Finance Agent via A2A.
        - Direct Node: Handles chit-chat/general queries.
     4. Synthesizer Node: Formats specialist data into a warm customer response.
@@ -20,17 +20,21 @@ Launch:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import io
 import os
 import uuid
 import time
 import random
 import logging
+from PIL import Image
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Literal, Union
 from typing_extensions import TypedDict
 
 import aiohttp
+import httpx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.graph import StateGraph, START, END
@@ -43,6 +47,7 @@ logger = logging.getLogger("SalesAgent")
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 SALES_MODEL = os.getenv("SALES_MODEL", "llama3.2")
+VISION_MODEL = os.getenv("VISION_MODEL", "llama3.2-vision")
 
 LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "http://host.docker.internal:4000")
 LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "sk-1234")
@@ -67,6 +72,7 @@ class State:
     current_intent_query: str = ""
     specialist_data: Dict[str, Any] = field(default_factory=dict)
     customer_name: str = ""
+    needs_vision: bool = False
 
 _llm = ChatOllama(
     model=SALES_MODEL,
@@ -76,12 +82,19 @@ _llm = ChatOllama(
     disable_streaming=True
 )
 
+_vision_llm = ChatOllama(
+    model=VISION_MODEL,
+    base_url=OLLAMA_BASE_URL,
+    temperature=0,
+    disable_streaming=True
+)
+
 ROUTER_PROMPT = """\
 You are the Orchestrator for a car dealership sales system.
 Analyze the user's latest message and route it to the correct specialist.
 
 ROUTING RULES:
-- "inventory": Questions about cars, stock, features, models, specs.
+- "inventory": Questions about cars, stock, features, models, specs, or requesting images.
 - "finance": Questions about loans, interest rates, monthly payments, approval, or credit.
 - "combined": Queries requiring both inventory AND finance information (e.g., "red SUV under 40k with financing").
 - "direct": Greetings, chit-chat, or questions unrelated to cars/finance.
@@ -89,7 +102,8 @@ ROUTING RULES:
 OUTPUT FORMAT (JSON ONLY):
 {{
     "route": "inventory" | "finance" | "combined" | "direct",
-    "query": "<refined search query for the specialist (or original text)>"
+    "query": "<refined search query for the specialist (or original text)>",
+    "needs_vision": true | false
 }}
 """
 
@@ -108,11 +122,13 @@ If AIShield Content Blocking is detected in the specialist data, respond with a 
 
 Customer Query: {query}
 Specialist Data: {specialist_text}
+Visual Analysis (if any): {vision_text}
 
 Guidelines:
 1. Answer the customer's query directly using the data.
-2. Be professional but conversational.
-3. If AIShield Content Blocking is detected in the specialist data, respond with a polite message about content restrictions and don't answer anything further.
+2. If Visual Analysis exists, enthusiastically describe the car's looks.
+3. Be professional but conversational.
+4. If AIShield Content Blocking is detected in the specialist data, respond with a polite message about content restrictions and don't answer anything further.
 
 Output JSON: {{ "response": "<your text>" }}
 """
@@ -127,6 +143,38 @@ def _get_aishield_headers() -> dict:
     except Exception:
         pass
     return None
+
+def compress_base64_image(base64_string: str, max_size: int = 512) -> str:
+    """
+    Decodes a base64 image, resizes it to max_size (width/height), 
+    and re-encodes it as a compressed JPEG to reduce string length.
+    """
+    try:
+        if "base64," in base64_string:
+            header, data = base64_string.split("base64,", 1)
+        else:
+            header = None
+            data = base64_string
+
+        image_data = base64.b64decode(data)
+        img = Image.open(io.BytesIO(image_data))
+
+        if img.width > max_size or img.height > max_size:
+            img.thumbnail((max_size, max_size))
+
+        buffer = io.BytesIO()
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+            
+        img.save(buffer, format="JPEG", quality=40, optimize=True) 
+        compressed_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        
+        return f"data:image/jpeg;base64,{compressed_data}"
+    except Exception as e:
+        print(f"Image compression failed: {e}")
+        if header and not base64_string.startswith("data:"):
+             return f"{header}base64,{data}"
+        return base64_string
 
 def _merge_aishield_headers(headers: Dict[str, str]) -> Dict[str, str]:
     aishield = _get_aishield_headers()
@@ -326,6 +374,7 @@ async def _a2a_call(
                     result = json.loads(raw_body)
 
                 response_text = "(No text response)"
+                image_data = []
 
                 artifacts = result.get("result", {}).get("artifacts", [])
                 status_msg = (result.get("result", {}).get("status") or {}).get("message")
@@ -346,16 +395,23 @@ async def _a2a_call(
 
                                 try:
                                     parsed = json.loads(raw_text)
-                                    if isinstance(parsed, dict) and "text" in parsed:
+                                    if isinstance(parsed, dict) and "images" in parsed:
                                         response_text = parsed.get("text", "")
+                                        image_data.extend(parsed.get("images", []))
                                         logger.info(
                                             f"[A2A Part {idx}.{part_idx}] ✓ Parsed JSON: "
-                                            f"text={len(response_text)} chars"
+                                            f"text={len(response_text)} chars, images={len(parsed['images'])}"
                                         )
                                     else:
                                         response_text = raw_text
                                 except (json.JSONDecodeError, TypeError):
                                     response_text = raw_text
+
+                            elif part_type == "image_url":
+                                url = part.get("image_url", {}).get("url")
+                                logger.info(f"[A2A Part {idx}.{part_idx}] image_url field: {url[:80] if url else 'None'}...")
+                                if url:
+                                    image_data.append(url)
 
                 else:
                     logger.warning("No artifacts or status message found in A2A response.")
@@ -366,12 +422,37 @@ async def _a2a_call(
                     for idx, part in enumerate(parts):
                         logger.info(f"[A2A Fallback Part {idx}] keys={list(part.keys())}")
                         part = part.get("text", {}) if isinstance(part, dict) else {}
-                        text_parts.append(part)
+                        if "images" in part or "image_url" in part:
+                            def _write_debug_file(path: str, content: str) -> None:
+                                with open(path, "w", encoding="utf-8") as f:
+                                    f.write(content)
+                            await asyncio.to_thread(
+                                _write_debug_file,
+                                "part.txt",
+                                part if isinstance(part, str) else json.dumps(part, indent=2, ensure_ascii=False)
+                            )
+                            part = json.loads(part) if isinstance(part, str) else part
+                            img_part = part.get("images") or part.get("image_url")
+                            for img in (img_part if isinstance(img_part, list) else []):
+                                image_data.append(img)
+                            if "text" in part:
+                                t = part.get("text")
+                                if t:
+                                    pprint(t)
+                                    if isinstance(t, str):
+                                        try:
+                                            t = json.loads(t)
+                                        except json.JSONDecodeError:
+                                            pass  # It's a normal string, keep it as is
+                                            
+                                    text_parts.append(t.get("description", "") if isinstance(t, dict) else t)
+                        else:
+                            text_parts.append(part)
 
                     response_text = "\n".join([p for p in text_parts if p])
 
-                logger.info(f"[A2A Extraction Complete] text={len(response_text)} chars")
-                return {"text": response_text}
+                logger.info(f"[A2A Extraction Complete] text={len(response_text)} chars, images={len(image_data)}")
+                return {"text": response_text, "images": image_data}
 
             except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError, asyncio.TimeoutError, aiohttp.ClientResponseError) as e:
                 elapsed = time.perf_counter() - start
@@ -387,11 +468,45 @@ async def _a2a_call(
                 break
 
         logger.error(f"A2A Call Failed after retries: {last_err}")
-        return {"text": "I'm having trouble connecting to that department right now."}
+        return {"text": "I'm having trouble connecting to that department right now.", "images": []}
 
     finally:
         if owns_session:
             await session.close()
+
+async def _analyze_images(image_data: List[str], query: str) -> str:
+    """Run Vision LLM on images if present.
+    
+    Args:
+        image_data: List of base64 data URIs or URLs
+        query: User's query for context
+    """
+    if not image_data:
+        return ""
+    
+    descriptions = []
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        for i, img in enumerate(image_data[:2]):
+            try:
+                if img.startswith("data:image/"):
+                    data_uri = img
+                else:
+                    resp = await client.get(img)
+                    resp.raise_for_status()
+                    b64_img = base64.b64encode(resp.content).decode('utf-8')
+                    data_uri = f"data:image/jpeg;base64,{b64_img}"
+                
+                msg = HumanMessage(content=[
+                    {"type": "text", "text": f"Briefly describe this car feature relevant to: '{query}'"},
+                    {"type": "image_url", "image_url": {"url": data_uri}}
+                ])
+                
+                res = await _vision_llm.ainvoke([msg])
+                descriptions.append(res.content)
+            except Exception as e:
+                logger.warning(f"Vision failed for image {i}: {e}")
+
+    return "\n".join(descriptions)
 
 async def orchestrator_node(state: State) -> Dict[str, Any]:
     """Analyzes intent and routes the conversation."""
@@ -405,21 +520,24 @@ async def orchestrator_node(state: State) -> Dict[str, Any]:
             HumanMessage(content=last_msg)
         ])
         decision = json.loads(response.content)
-        logger.info(f"Route decision: {decision.get('route')}")
+        logger.info(f"Route decision: {decision.get('route')}, needs_vision: {decision.get('needs_vision', False)}")
     except Exception as e:
         logger.warning(f"Router parsing failed: {e}")
-        decision = {"route": "direct", "query": last_msg}
+        decision = {"route": "direct", "query": last_msg, "needs_vision": False}
         
     return {
         "next_step": decision.get("route", "direct"),
-        "current_intent_query": decision.get("query", last_msg)
+        "current_intent_query": decision.get("query", last_msg),
+        "needs_vision": decision.get("needs_vision", False)
     }
 
 async def inventory_node(state: State) -> Dict[str, Any]:
     """Worker: Handles Inventory A2A calls."""
     logger.info("Executing Inventory Node")
     data = await _a2a_call(LITELLM_BASE_URL, state.current_intent_query, aid=SPECIALIST_AID["inventory"], api_key=LITELLM_API_KEY)
-    logger.info(f"Received from Inventory: text_length={len(data.get('text', ''))}")
+    logger.info(f"Received from Inventory: text_length={len(data.get('text', ''))}, images_count={len(data.get('images', []))}")
+    if data.get('images'):
+        logger.info(f"First image preview: {data['images'][0][:100]}...")
     return {"specialist_data": data}
 
 async def finance_node(state: State) -> Dict[str, Any]:
@@ -443,7 +561,8 @@ async def combined_node(state: State) -> Dict[str, Any]:
     
     return {
         "specialist_data": {
-            "text": combined_text
+            "text": combined_text,
+            "images": inventory_data.get("images", [])
         }
     }
 
@@ -466,17 +585,27 @@ async def direct_node(state: State) -> Dict[str, Any]:
     }
 
 async def synthesizer_node(state: State) -> Dict[str, Any]:
-    """Synthesizes specialist data into a final response."""
+    """Synthesizes specialist data + vision analysis into a final response."""
     logger.info("Executing Synthesizer Node")
     
     data = state.specialist_data
+    images = data.get("images", [])
     text_data = data.get("text", "")
     
-    logger.info(f"Synthesizer received: text_length={len(text_data)}")
+    logger.info(f"Synthesizer received: text_length={len(text_data)}, images_count={len(images)}")
+    
+    vision_text = ""
+    if images:
+        logger.info(f"Running vision analysis on {len(images)} images")
+        vision_text = await _analyze_images(images, state.current_intent_query)
+        logger.info(f"Vision analysis result length: {len(vision_text)}")
+    else:
+        logger.info("No images to analyze")
         
     prompt = SYNTHESIZER_PROMPT.format(
         query=state.current_intent_query,
-        specialist_text=text_data
+        specialist_text=text_data,
+        vision_text=vision_text
     )
     
     try:
@@ -484,10 +613,31 @@ async def synthesizer_node(state: State) -> Dict[str, Any]:
         final_text = json.loads(response.content).get("response", str(response.content))
     except:
         final_text = text_data
+        
+    if images:
+        markdown_content = final_text + "\n\n"
+        
+        for i, img in enumerate(images):
+            # Ensure proper prefix for base64 if missing
+            if not img.startswith("http") and not img.startswith("data:"):
+                img = f"data:image/jpeg;base64,{img}"
+            if img.startswith("http"):
+                clean_img = img
+            else:
+                # 2. Compress the Base64 string
+                clean_img = await asyncio.to_thread(compress_base64_image, img)
+            
+            # Format as Markdown Image
+            markdown_content += f"![Vehicle Image {i+1}]({clean_img})\n\n"
 
-    return {
-        "messages": [AIMessage(content=final_text)]
-    }
+        # Return as a single string message (bypasses LiteLLM list error)
+        return {
+            "messages": [AIMessage(content=markdown_content)]
+        }
+    else:
+        return {
+            "messages": [AIMessage(content=final_text)]
+        }
 
 
 async def route_request(state: State) -> str:
