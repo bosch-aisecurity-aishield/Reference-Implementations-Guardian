@@ -9,5 +9,5 @@ aiohttp
 mcp
 psycopg2-binary
 chromadb
-
 langchain-mcp-adapters
+a2a-sdk

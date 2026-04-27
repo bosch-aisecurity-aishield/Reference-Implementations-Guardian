@@ -10,5 +10,5 @@ langchain-litellm
 mcp
 psycopg2-binary
 chromadb
-
+a2a-sdk
 langchain-mcp-adapters

@@ -10,3 +10,4 @@ mcp
 psycopg2-binary
 chromadb
 Pillow
+a2a-sdk
